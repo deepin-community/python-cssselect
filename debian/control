@@ -1,0 +1,32 @@
+Source: python-cssselect
+Section: python
+Priority: optional
+Maintainer: Debian Python Team <team+python@tracker.debian.org>
+Uploaders: TANIGUCHI Takaki <takaki@debian.org>,
+           W. Martin Borgert <debacle@debian.org>,
+           Andrey Rahmatullin <wrar@debian.org>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               python3-all,
+               python3-lxml,
+               python3-pytest <!nocheck>,
+               python3-setuptools
+Standards-Version: 4.6.0
+Homepage: https://github.com/scrapy/cssselect/
+Vcs-Git: https://salsa.debian.org/python-team/packages/python-cssselect.git
+Vcs-Browser: https://salsa.debian.org/python-team/packages/python-cssselect
+Testsuite: autopkgtest-pkg-python
+Rules-Requires-Root: no
+
+Package: python3-cssselect
+Architecture: all
+Depends: python3, ${misc:Depends}
+Description: cssselect parses CSS3 Selectors and translates them to XPath 1.0
+ cssselect parses CSS3 Selectors and translate them to XPath 1.0 expressions.
+ Such expressions can be used in lxml or another XPath engine to find the
+ matching elements in an XML or HTML document.
+ .
+ This module used to live inside of lxml as lxml.cssselect before it was
+ extracted as a stand-alone project.
+ .
+ This package provides the Python 3.x module.
