@@ -1,6 +1,10 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: python-cssselect
 Source: https://github.com/scrapy/cssselect/
+Comment: The upstream version was switched from 1.1.0 to 1.1.0+ds when switching
+ from PyPI tarballs to Github ones that have different contents. This suffix
+ should be dropped for the next upstream version.
+Upstream-Contact: Paul Tremberth <paul.tremberth@gmail.com>
 
 Files: *
 Copyright: 2007-2012 Ian Bicking and contributors
