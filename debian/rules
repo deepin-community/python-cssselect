@@ -4,4 +4,10 @@
 export PYBUILD_NAME=cssselect
 
 %:
-	dh $@ --with python3 --buildsystem=pybuild
+	dh $@ --buildsystem=pybuild
+
+override_dh_sphinxdoc:
+ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))
+	PYTHONPATH=. python3 -m sphinx -b html -N docs/ $(CURDIR)/debian/python-cssselect-doc/usr/share/doc/python-cssselect-doc/html
+	dh_sphinxdoc
+endif

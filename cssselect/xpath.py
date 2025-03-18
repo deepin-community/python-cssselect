@@ -1,35 +1,45 @@
-# -*- coding: utf-8 -*-
 """
-    cssselect.xpath
-    ===============
+cssselect.xpath
+===============
 
-    Translation of parsed CSS selectors to XPath expressions.
+Translation of parsed CSS selectors to XPath expressions.
 
 
-    :copyright: (c) 2007-2012 Ian Bicking and contributors.
-                See AUTHORS for more details.
-    :license: BSD, see LICENSE for more details.
+:copyright: (c) 2007-2012 Ian Bicking and contributors.
+See AUTHORS for more details.
+:license: BSD, see LICENSE for more details.
 
 """
 
-import sys
+from __future__ import annotations
+
 import re
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Optional, cast
 
-from cssselect.parser import parse, parse_series, SelectorError
+from cssselect.parser import (
+    Attrib,
+    Class,
+    CombinedSelector,
+    Element,
+    Function,
+    Hash,
+    Matching,
+    Negation,
+    Pseudo,
+    PseudoElement,
+    Relation,
+    Selector,
+    SelectorError,
+    SpecificityAdjustment,
+    Tree,
+    parse,
+    parse_series,
+)
 
-
-if sys.version_info[0] < 3:
-    _basestring = basestring
-    _unicode = unicode
-else:
-    _basestring = str
-    _unicode = str
-
-
-def _unicode_safe_getattr(obj, name, default=None):
-    # getattr() with a non-ASCII name fails on Python 2.x
-    name = name.encode('ascii', 'replace').decode('ascii')
-    return getattr(obj, name, default)
+if TYPE_CHECKING:
+    # typing.Self requires Python 3.11
+    from typing_extensions import Self
 
 
 class ExpressionError(SelectorError, RuntimeError):
@@ -38,52 +48,72 @@ class ExpressionError(SelectorError, RuntimeError):
 
 #### XPath Helpers
 
-class XPathExpr(object):
 
-    def __init__(self, path='', element='*', condition='', star_prefix=False):
+class XPathExpr:
+    def __init__(
+        self,
+        path: str = "",
+        element: str = "*",
+        condition: str = "",
+        star_prefix: bool = False,
+    ) -> None:
         self.path = path
         self.element = element
         self.condition = condition
 
-    def __str__(self):
-        path =  _unicode(self.path) + _unicode(self.element)
+    def __str__(self) -> str:
+        path = str(self.path) + str(self.element)
         if self.condition:
-            path += '[%s]' % self.condition
+            path += f"[{self.condition}]"
         return path
 
-    def __repr__(self):
-        return '%s[%s]' % (self.__class__.__name__, self)
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}[{self}]"
 
-    def add_condition(self, condition):
+    def add_condition(self, condition: str, conjuction: str = "and") -> Self:
         if self.condition:
-            self.condition = '%s and (%s)' % (self.condition, condition)
+            self.condition = f"({self.condition}) {conjuction} ({condition})"
         else:
             self.condition = condition
         return self
 
-    def add_name_test(self):
-        if self.element == '*':
+    def add_name_test(self) -> None:
+        if self.element == "*":
             # We weren't doing a test anyway
             return
-        self.add_condition(
-            "name() = %s" % GenericTranslator.xpath_literal(self.element))
-        self.element = '*'
+        self.add_condition(f"name() = {GenericTranslator.xpath_literal(self.element)}")
+        self.element = "*"
 
-    def add_star_prefix(self):
+    def add_star_prefix(self) -> None:
         """
         Append '*/' to the path to keep the context constrained
         to a single parent.
         """
-        self.path += '*/'
+        self.path += "*/"
 
-    def join(self, combiner, other):
-        path = _unicode(self) + combiner
+    def join(
+        self,
+        combiner: str,
+        other: XPathExpr,
+        closing_combiner: str | None = None,
+        has_inner_condition: bool = False,
+    ) -> Self:
+        path = str(self) + combiner
         # Any "star prefix" is redundant when joining.
-        if other.path != '*/':
+        if other.path != "*/":
             path += other.path
         self.path = path
-        self.element = other.element
-        self.condition = other.condition
+        if not has_inner_condition:
+            self.element = (
+                other.element + closing_combiner if closing_combiner else other.element
+            )
+            self.condition = other.condition
+        else:
+            self.element = other.element
+            if other.condition:
+                self.element += "[" + other.condition + "]"
+            if closing_combiner:
+                self.element += closing_combiner
         return self
 
 
@@ -92,15 +122,16 @@ split_at_single_quotes = re.compile("('+)").split
 # The spec is actually more permissive than that, but don’t bother.
 # This is just for the fast path.
 # http://www.w3.org/TR/REC-xml/#NT-NameStartChar
-is_safe_name = re.compile('^[a-zA-Z_][a-zA-Z0-9_.-]*$').match
+is_safe_name = re.compile("^[a-zA-Z_][a-zA-Z0-9_.-]*$").match
 
 # Test that the string is not empty and does not contain whitespace
-is_non_whitespace = re.compile(r'^[^ \t\r\n\f]+$').match
+is_non_whitespace = re.compile(r"^[^ \t\r\n\f]+$").match
 
 
 #### Translation
 
-class GenericTranslator(object):
+
+class GenericTranslator:
     """
     Translator for "generic" XML documents.
 
@@ -122,30 +153,30 @@ class GenericTranslator(object):
     ####
 
     combinator_mapping = {
-        ' ': 'descendant',
-        '>': 'child',
-        '+': 'direct_adjacent',
-        '~': 'indirect_adjacent',
+        " ": "descendant",
+        ">": "child",
+        "+": "direct_adjacent",
+        "~": "indirect_adjacent",
     }
 
     attribute_operator_mapping = {
-       'exists': 'exists',
-        '=': 'equals',
-        '~=': 'includes',
-        '|=': 'dashmatch',
-        '^=': 'prefixmatch',
-        '$=': 'suffixmatch',
-        '*=': 'substringmatch',
-        '!=': 'different',  # XXX Not in Level 3 but meh
+        "exists": "exists",
+        "=": "equals",
+        "~=": "includes",
+        "|=": "dashmatch",
+        "^=": "prefixmatch",
+        "$=": "suffixmatch",
+        "*=": "substringmatch",
+        "!=": "different",  # XXX Not in Level 3 but meh
     }
 
     #: The attribute used for ID selectors depends on the document language:
     #: http://www.w3.org/TR/selectors/#id-selectors
-    id_attribute = 'id'
+    id_attribute = "id"
 
     #: The attribute used for ``:lang()`` depends on the document language:
     #: http://www.w3.org/TR/selectors/#lang-pseudo
-    lang_attribute = 'xml:lang'
+    lang_attribute = "xml:lang"
 
     #: The case sensitivity of document language element names,
     #: attribute names, and attribute values in selectors depends
@@ -168,31 +199,36 @@ class GenericTranslator(object):
     # class used to represent and xpath expression
     xpathexpr_cls = XPathExpr
 
-    def css_to_xpath(self, css, prefix='descendant-or-self::'):
+    def css_to_xpath(self, css: str, prefix: str = "descendant-or-self::") -> str:
         """Translate a *group of selectors* to XPath.
 
         Pseudo-elements are not supported here since XPath only knows
         about "real" elements.
 
         :param css:
-            A *group of selectors* as an Unicode string.
+            A *group of selectors* as a string.
         :param prefix:
             This string is prepended to the XPath expression for each selector.
             The default makes selectors scoped to the context node’s subtree.
         :raises:
-            :class:`SelectorSyntaxError` on invalid selectors,
+            :class:`~cssselect.SelectorSyntaxError` on invalid selectors,
             :class:`ExpressionError` on unknown/unsupported selectors,
             including pseudo-elements.
         :returns:
-            The equivalent XPath 1.0 expression as an Unicode string.
+            The equivalent XPath 1.0 expression as a string.
 
         """
-        return ' | '.join(self.selector_to_xpath(selector, prefix,
-                                                 translate_pseudo_elements=True)
-                          for selector in parse(css))
+        return " | ".join(
+            self.selector_to_xpath(selector, prefix, translate_pseudo_elements=True)
+            for selector in parse(css)
+        )
 
-    def selector_to_xpath(self, selector, prefix='descendant-or-self::',
-                          translate_pseudo_elements=False):
+    def selector_to_xpath(
+        self,
+        selector: Selector,
+        prefix: str = "descendant-or-self::",
+        translate_pseudo_elements: bool = False,
+    ) -> str:
         """Translate a parsed selector to XPath.
 
 
@@ -210,174 +246,254 @@ class GenericTranslator(object):
         :raises:
             :class:`ExpressionError` on unknown/unsupported selectors.
         :returns:
-            The equivalent XPath 1.0 expression as an Unicode string.
+            The equivalent XPath 1.0 expression as a string.
 
         """
-        tree = getattr(selector, 'parsed_tree', None)
+        tree = getattr(selector, "parsed_tree", None)
         if not tree:
-            raise TypeError('Expected a parsed selector, got %r' % (selector,))
+            raise TypeError(f"Expected a parsed selector, got {selector!r}")
         xpath = self.xpath(tree)
         assert isinstance(xpath, self.xpathexpr_cls)  # help debug a missing 'return'
         if translate_pseudo_elements and selector.pseudo_element:
             xpath = self.xpath_pseudo_element(xpath, selector.pseudo_element)
-        return (prefix or '') + _unicode(xpath)
+        return (prefix or "") + str(xpath)
 
-    def xpath_pseudo_element(self, xpath, pseudo_element):
+    def xpath_pseudo_element(
+        self, xpath: XPathExpr, pseudo_element: PseudoElement
+    ) -> XPathExpr:
         """Translate a pseudo-element.
 
         Defaults to not supporting pseudo-elements at all,
         but can be overridden by sub-classes.
 
         """
-        raise ExpressionError('Pseudo-elements are not supported.')
+        raise ExpressionError("Pseudo-elements are not supported.")
 
     @staticmethod
-    def xpath_literal(s):
-        s = _unicode(s)
+    def xpath_literal(s: str) -> str:
+        s = str(s)
         if "'" not in s:
-            s = "'%s'" % s
+            s = f"'{s}'"
         elif '"' not in s:
-            s = '"%s"' % s
+            s = f'"{s}"'
         else:
-            s = "concat(%s)" % ','.join([
-                (("'" in part) and '"%s"' or "'%s'") % part
-                for part in split_at_single_quotes(s) if part
-                ])
+            parts_quoted = [
+                f'"{part}"' if "'" in part else f"'{part}'"
+                for part in split_at_single_quotes(s)
+                if part
+            ]
+            s = "concat({})".format(",".join(parts_quoted))
         return s
 
-    def xpath(self, parsed_selector):
+    def xpath(self, parsed_selector: Tree) -> XPathExpr:
         """Translate any parsed selector object."""
         type_name = type(parsed_selector).__name__
-        method = getattr(self, 'xpath_%s' % type_name.lower(), None)
+        method = cast(
+            Optional[Callable[[Tree], XPathExpr]],
+            getattr(self, f"xpath_{type_name.lower()}", None),
+        )
         if method is None:
-            raise ExpressionError('%s is not supported.' %  type_name)
+            raise ExpressionError(f"{type_name} is not supported.")
         return method(parsed_selector)
-
 
     # Dispatched by parsed object type
 
-    def xpath_combinedselector(self, combined):
+    def xpath_combinedselector(self, combined: CombinedSelector) -> XPathExpr:
         """Translate a combined selector."""
         combinator = self.combinator_mapping[combined.combinator]
-        method = getattr(self, 'xpath_%s_combinator' % combinator)
-        return method(self.xpath(combined.selector),
-                      self.xpath(combined.subselector))
+        method = cast(
+            Callable[[XPathExpr, XPathExpr], XPathExpr],
+            getattr(self, f"xpath_{combinator}_combinator"),
+        )
+        return method(self.xpath(combined.selector), self.xpath(combined.subselector))
 
-    def xpath_negation(self, negation):
+    def xpath_negation(self, negation: Negation) -> XPathExpr:
         xpath = self.xpath(negation.selector)
         sub_xpath = self.xpath(negation.subselector)
         sub_xpath.add_name_test()
         if sub_xpath.condition:
-            return xpath.add_condition('not(%s)' % sub_xpath.condition)
-        else:
-            return xpath.add_condition('0')
+            return xpath.add_condition(f"not({sub_xpath.condition})")
+        return xpath.add_condition("0")
 
-    def xpath_function(self, function):
+    def xpath_relation(self, relation: Relation) -> XPathExpr:
+        xpath = self.xpath(relation.selector)
+        combinator = relation.combinator
+        subselector = relation.subselector
+        right = self.xpath(subselector.parsed_tree)
+        method = cast(
+            Callable[[XPathExpr, XPathExpr], XPathExpr],
+            getattr(
+                self,
+                f"xpath_relation_{self.combinator_mapping[cast(str, combinator.value)]}_combinator",
+            ),
+        )
+        return method(xpath, right)
+
+    def xpath_matching(self, matching: Matching) -> XPathExpr:
+        xpath = self.xpath(matching.selector)
+        exprs = [self.xpath(selector) for selector in matching.selector_list]
+        for e in exprs:
+            e.add_name_test()
+            if e.condition:
+                xpath.add_condition(e.condition, "or")
+        return xpath
+
+    def xpath_specificityadjustment(self, matching: SpecificityAdjustment) -> XPathExpr:
+        xpath = self.xpath(matching.selector)
+        exprs = [self.xpath(selector) for selector in matching.selector_list]
+        for e in exprs:
+            e.add_name_test()
+            if e.condition:
+                xpath.add_condition(e.condition, "or")
+        return xpath
+
+    def xpath_function(self, function: Function) -> XPathExpr:
         """Translate a functional pseudo-class."""
-        method = 'xpath_%s_function' % function.name.replace('-', '_')
-        method = _unicode_safe_getattr(self, method, None)
+        method_name = "xpath_{}_function".format(function.name.replace("-", "_"))
+        method = cast(
+            Optional[Callable[[XPathExpr, Function], XPathExpr]],
+            getattr(self, method_name, None),
+        )
         if not method:
-            raise ExpressionError(
-                "The pseudo-class :%s() is unknown" % function.name)
+            raise ExpressionError(f"The pseudo-class :{function.name}() is unknown")
         return method(self.xpath(function.selector), function)
 
-    def xpath_pseudo(self, pseudo):
+    def xpath_pseudo(self, pseudo: Pseudo) -> XPathExpr:
         """Translate a pseudo-class."""
-        method = 'xpath_%s_pseudo' % pseudo.ident.replace('-', '_')
-        method = _unicode_safe_getattr(self, method, None)
+        method_name = "xpath_{}_pseudo".format(pseudo.ident.replace("-", "_"))
+        method = cast(
+            Optional[Callable[[XPathExpr], XPathExpr]], getattr(self, method_name, None)
+        )
         if not method:
             # TODO: better error message for pseudo-elements?
-            raise ExpressionError(
-                "The pseudo-class :%s is unknown" % pseudo.ident)
+            raise ExpressionError(f"The pseudo-class :{pseudo.ident} is unknown")
         return method(self.xpath(pseudo.selector))
 
-
-    def xpath_attrib(self, selector):
+    def xpath_attrib(self, selector: Attrib) -> XPathExpr:
         """Translate an attribute selector."""
         operator = self.attribute_operator_mapping[selector.operator]
-        method = getattr(self, 'xpath_attrib_%s' % operator)
+        method = cast(
+            Callable[[XPathExpr, str, Optional[str]], XPathExpr],
+            getattr(self, f"xpath_attrib_{operator}"),
+        )
         if self.lower_case_attribute_names:
             name = selector.attrib.lower()
         else:
             name = selector.attrib
         safe = is_safe_name(name)
         if selector.namespace:
-            name = '%s:%s' % (selector.namespace, name)
+            name = f"{selector.namespace}:{name}"
             safe = safe and is_safe_name(selector.namespace)
         if safe:
-            attrib = '@' + name
+            attrib = "@" + name
         else:
-            attrib = 'attribute::*[name() = %s]' % self.xpath_literal(name)
+            attrib = f"attribute::*[name() = {self.xpath_literal(name)}]"
         if selector.value is None:
             value = None
         elif self.lower_case_attribute_values:
-            value = selector.value.value.lower()
+            value = cast(str, selector.value.value).lower()
         else:
             value = selector.value.value
         return method(self.xpath(selector.selector), attrib, value)
 
-    def xpath_class(self, class_selector):
+    def xpath_class(self, class_selector: Class) -> XPathExpr:
         """Translate a class selector."""
         # .foo is defined as [class~=foo] in the spec.
         xpath = self.xpath(class_selector.selector)
-        return self.xpath_attrib_includes(
-            xpath, '@class', class_selector.class_name)
+        return self.xpath_attrib_includes(xpath, "@class", class_selector.class_name)
 
-    def xpath_hash(self, id_selector):
+    def xpath_hash(self, id_selector: Hash) -> XPathExpr:
         """Translate an ID selector."""
         xpath = self.xpath(id_selector.selector)
-        return self.xpath_attrib_equals(xpath, '@id', id_selector.id)
+        return self.xpath_attrib_equals(xpath, "@id", id_selector.id)
 
-    def xpath_element(self, selector):
+    def xpath_element(self, selector: Element) -> XPathExpr:
         """Translate a type or universal selector."""
         element = selector.element
         if not element:
-            element = '*'
+            element = "*"
             safe = True
         else:
-            safe = is_safe_name(element)
+            safe = bool(is_safe_name(element))
             if self.lower_case_element_names:
                 element = element.lower()
         if selector.namespace:
             # Namespace prefixes are case-sensitive.
             # http://www.w3.org/TR/css3-namespace/#prefixes
-            element = '%s:%s' % (selector.namespace, element)
-            safe = safe and is_safe_name(selector.namespace)
+            element = f"{selector.namespace}:{element}"
+            safe = safe and bool(is_safe_name(selector.namespace))
         xpath = self.xpathexpr_cls(element=element)
         if not safe:
             xpath.add_name_test()
         return xpath
 
-
     # CombinedSelector: dispatch by combinator
 
-    def xpath_descendant_combinator(self, left, right):
+    def xpath_descendant_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
         """right is a child, grand-child or further descendant of left"""
-        return left.join('/descendant-or-self::*/', right)
+        return left.join("/descendant-or-self::*/", right)
 
-    def xpath_child_combinator(self, left, right):
+    def xpath_child_combinator(self, left: XPathExpr, right: XPathExpr) -> XPathExpr:
         """right is an immediate child of left"""
-        return left.join('/', right)
+        return left.join("/", right)
 
-    def xpath_direct_adjacent_combinator(self, left, right):
+    def xpath_direct_adjacent_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
         """right is a sibling immediately after left"""
-        xpath = left.join('/following-sibling::', right)
+        xpath = left.join("/following-sibling::", right)
         xpath.add_name_test()
-        return xpath.add_condition('position() = 1')
+        return xpath.add_condition("position() = 1")
 
-    def xpath_indirect_adjacent_combinator(self, left, right):
+    def xpath_indirect_adjacent_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
         """right is a sibling after left, immediately or not"""
-        return left.join('/following-sibling::', right)
+        return left.join("/following-sibling::", right)
 
+    def xpath_relation_descendant_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
+        """right is a child, grand-child or further descendant of left; select left"""
+        return left.join(
+            "[descendant::", right, closing_combiner="]", has_inner_condition=True
+        )
+
+    def xpath_relation_child_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
+        """right is an immediate child of left; select left"""
+        return left.join("[./", right, closing_combiner="]")
+
+    def xpath_relation_direct_adjacent_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
+        """right is a sibling immediately after left; select left"""
+        return left.add_condition(
+            f"following-sibling::*[(name() = '{right.element}') and (position() = 1)]"
+        )
+
+    def xpath_relation_indirect_adjacent_combinator(
+        self, left: XPathExpr, right: XPathExpr
+    ) -> XPathExpr:
+        """right is a sibling after left, immediately or not; select left"""
+        return left.join("[following-sibling::", right, closing_combiner="]")
 
     # Function: dispatch by function/pseudo-class name
 
-    def xpath_nth_child_function(self, xpath, function, last=False,
-                                 add_name_test=True):
+    def xpath_nth_child_function(
+        self,
+        xpath: XPathExpr,
+        function: Function,
+        last: bool = False,
+        add_name_test: bool = True,
+    ) -> XPathExpr:
         try:
             a, b = parse_series(function.arguments)
-        except ValueError:
-            raise ExpressionError("Invalid series: '%r'" % function.arguments)
+        except ValueError as ex:
+            raise ExpressionError(f"Invalid series: '{function.arguments!r}'") from ex
 
         # From https://www.w3.org/TR/css3-selectors/#structural-pseudos:
         #
@@ -427,49 +543,46 @@ class GenericTranslator(object):
         # for a == 1, nth-*(an+b) means n+b-1 siblings before/after,
         # and since n ∈ {0, 1, 2, ...}, if b-1<=0,
         # there is always an "n" matching any number of siblings (maybe none)
-        if a == 1 and b_min_1 <=0:
+        if a == 1 and b_min_1 <= 0:
             return xpath
 
         # early-exit condition 2:
         # ~~~~~~~~~~~~~~~~~~~~~~~
         # an+b-1 siblings with a<0 and (b-1)<0 is not possible
         if a < 0 and b_min_1 < 0:
-            return xpath.add_condition('0')
+            return xpath.add_condition("0")
 
         # `add_name_test` boolean is inverted and somewhat counter-intuitive:
         #
         # nth_of_type() calls nth_child(add_name_test=False)
-        if add_name_test:
-            nodetest = '*'
-        else:
-            nodetest  = '%s' % xpath.element
+        nodetest = "*" if add_name_test else f"{xpath.element}"
 
         # count siblings before or after the element
         if not last:
-            siblings_count = 'count(preceding-sibling::%s)' % nodetest
+            siblings_count = f"count(preceding-sibling::{nodetest})"
         else:
-            siblings_count = 'count(following-sibling::%s)' % nodetest
+            siblings_count = f"count(following-sibling::{nodetest})"
 
         # special case of fixed position: nth-*(0n+b)
         # if a == 0:
         # ~~~~~~~~~~
         #    count(***-sibling::***) = b-1
         if a == 0:
-            return xpath.add_condition('%s = %s' % (siblings_count, b_min_1))
+            return xpath.add_condition(f"{siblings_count} = {b_min_1}")
 
-        expr = []
+        expressions = []
 
         if a > 0:
             # siblings count, an+b-1, is always >= 0,
             # so if a>0, and (b-1)<=0, an "n" exists to satisfy this,
             # therefore, the predicate is only interesting if (b-1)>0
             if b_min_1 > 0:
-                expr.append('%s >= %s' % (siblings_count, b_min_1))
+                expressions.append(f"{siblings_count} >= {b_min_1}")
         else:
             # if a<0, and (b-1)<0, no "n" satisfies this,
             # this is tested above as an early exist condition
             # otherwise,
-            expr.append('%s <= %s' % (siblings_count, b_min_1))
+            expressions.append(f"{siblings_count} <= {b_min_1}")
 
         # operations modulo 1 or -1 are simpler, one only needs to verify:
         #
@@ -492,55 +605,60 @@ class GenericTranslator(object):
             b_neg = (-b_min_1) % abs(a)
 
             if b_neg != 0:
-                b_neg = '+%s' % b_neg
-                left = '(%s %s)' % (left, b_neg)
+                left = f"({left} +{b_neg})"
 
-            expr.append('%s mod %s = 0' % (left, a))
+            expressions.append(f"{left} mod {a} = 0")
 
-        xpath.add_condition(' and '.join(expr))
+        template = "(%s)" if len(expressions) > 1 else "%s"
+        xpath.add_condition(
+            " and ".join(template % expression for expression in expressions)
+        )
         return xpath
 
-    def xpath_nth_last_child_function(self, xpath, function):
+    def xpath_nth_last_child_function(
+        self, xpath: XPathExpr, function: Function
+    ) -> XPathExpr:
         return self.xpath_nth_child_function(xpath, function, last=True)
 
-    def xpath_nth_of_type_function(self, xpath, function):
-        if xpath.element == '*':
-            raise ExpressionError(
-                "*:nth-of-type() is not implemented")
-        return self.xpath_nth_child_function(xpath, function,
-                                             add_name_test=False)
+    def xpath_nth_of_type_function(
+        self, xpath: XPathExpr, function: Function
+    ) -> XPathExpr:
+        if xpath.element == "*":
+            raise ExpressionError("*:nth-of-type() is not implemented")
+        return self.xpath_nth_child_function(xpath, function, add_name_test=False)
 
-    def xpath_nth_last_of_type_function(self, xpath, function):
-        if xpath.element == '*':
-            raise ExpressionError(
-                "*:nth-of-type() is not implemented")
-        return self.xpath_nth_child_function(xpath, function, last=True,
-                                             add_name_test=False)
+    def xpath_nth_last_of_type_function(
+        self, xpath: XPathExpr, function: Function
+    ) -> XPathExpr:
+        if xpath.element == "*":
+            raise ExpressionError("*:nth-of-type() is not implemented")
+        return self.xpath_nth_child_function(
+            xpath, function, last=True, add_name_test=False
+        )
 
-    def xpath_contains_function(self, xpath, function):
+    def xpath_contains_function(
+        self, xpath: XPathExpr, function: Function
+    ) -> XPathExpr:
         # Defined there, removed in later drafts:
         # http://www.w3.org/TR/2001/CR-css3-selectors-20011113/#content-selectors
-        if function.argument_types() not in (['STRING'], ['IDENT']):
+        if function.argument_types() not in (["STRING"], ["IDENT"]):
             raise ExpressionError(
-                "Expected a single string or ident for :contains(), got %r"
-                % function.arguments)
-        value = function.arguments[0].value
-        return xpath.add_condition(
-            'contains(., %s)' % self.xpath_literal(value))
+                f"Expected a single string or ident for :contains(), got {function.arguments!r}"
+            )
+        value = cast(str, function.arguments[0].value)
+        return xpath.add_condition(f"contains(., {self.xpath_literal(value)})")
 
-    def xpath_lang_function(self, xpath, function):
-        if function.argument_types() not in (['STRING'], ['IDENT']):
+    def xpath_lang_function(self, xpath: XPathExpr, function: Function) -> XPathExpr:
+        if function.argument_types() not in (["STRING"], ["IDENT"]):
             raise ExpressionError(
-                "Expected a single string or ident for :lang(), got %r"
-                % function.arguments)
-        value = function.arguments[0].value
-        return xpath.add_condition(
-            "lang(%s)" % (self.xpath_literal(value)))
-
+                f"Expected a single string or ident for :lang(), got {function.arguments!r}"
+            )
+        value = cast(str, function.arguments[0].value)
+        return xpath.add_condition(f"lang({self.xpath_literal(value)})")
 
     # Pseudo: dispatch by pseudo-class name
 
-    def xpath_root_pseudo(self, xpath):
+    def xpath_root_pseudo(self, xpath: XPathExpr) -> XPathExpr:
         return xpath.add_condition("not(parent::*)")
 
     # CSS immediate children (CSS ":scope > div" to XPath "child::div" or "./div")
@@ -548,40 +666,37 @@ class GenericTranslator(object):
     # Needed to get immediate children of a processed selector in Scrapy
     # for product in response.css('.product'):
     #     description = product.css(':scope > div::text').get()
-    def xpath_scope_pseudo(self, xpath):
+    def xpath_scope_pseudo(self, xpath: XPathExpr) -> XPathExpr:
         return xpath.add_condition("1")
 
-    def xpath_first_child_pseudo(self, xpath):
-        return xpath.add_condition('count(preceding-sibling::*) = 0')
+    def xpath_first_child_pseudo(self, xpath: XPathExpr) -> XPathExpr:
+        return xpath.add_condition("count(preceding-sibling::*) = 0")
 
-    def xpath_last_child_pseudo(self, xpath):
-        return xpath.add_condition('count(following-sibling::*) = 0')
+    def xpath_last_child_pseudo(self, xpath: XPathExpr) -> XPathExpr:
+        return xpath.add_condition("count(following-sibling::*) = 0")
 
-    def xpath_first_of_type_pseudo(self, xpath):
-        if xpath.element == '*':
-            raise ExpressionError(
-                "*:first-of-type is not implemented")
-        return xpath.add_condition('count(preceding-sibling::%s) = 0' % xpath.element)
+    def xpath_first_of_type_pseudo(self, xpath: XPathExpr) -> XPathExpr:
+        if xpath.element == "*":
+            raise ExpressionError("*:first-of-type is not implemented")
+        return xpath.add_condition(f"count(preceding-sibling::{xpath.element}) = 0")
 
-    def xpath_last_of_type_pseudo(self, xpath):
-        if xpath.element == '*':
-            raise ExpressionError(
-                "*:last-of-type is not implemented")
-        return xpath.add_condition('count(following-sibling::%s) = 0' % xpath.element)
+    def xpath_last_of_type_pseudo(self, xpath: XPathExpr) -> XPathExpr:
+        if xpath.element == "*":
+            raise ExpressionError("*:last-of-type is not implemented")
+        return xpath.add_condition(f"count(following-sibling::{xpath.element}) = 0")
 
-    def xpath_only_child_pseudo(self, xpath):
-        return xpath.add_condition('count(parent::*/child::*) = 1')
+    def xpath_only_child_pseudo(self, xpath: XPathExpr) -> XPathExpr:
+        return xpath.add_condition("count(parent::*/child::*) = 1")
 
-    def xpath_only_of_type_pseudo(self, xpath):
-        if xpath.element == '*':
-            raise ExpressionError(
-                "*:only-of-type is not implemented")
-        return xpath.add_condition('count(parent::*/child::%s) = 1' % xpath.element)
+    def xpath_only_of_type_pseudo(self, xpath: XPathExpr) -> XPathExpr:
+        if xpath.element == "*":
+            raise ExpressionError("*:only-of-type is not implemented")
+        return xpath.add_condition(f"count(parent::*/child::{xpath.element}) = 1")
 
-    def xpath_empty_pseudo(self, xpath):
+    def xpath_empty_pseudo(self, xpath: XPathExpr) -> XPathExpr:
         return xpath.add_condition("not(*) and not(string-length())")
 
-    def pseudo_never_matches(self, xpath):
+    def pseudo_never_matches(self, xpath: XPathExpr) -> XPathExpr:
         """Common implementation for pseudo-classes that never match."""
         return xpath.add_condition("0")
 
@@ -597,67 +712,88 @@ class GenericTranslator(object):
 
     # Attrib: dispatch by attribute operator
 
-    def xpath_attrib_exists(self, xpath, name, value):
+    def xpath_attrib_exists(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
         assert not value
         xpath.add_condition(name)
         return xpath
 
-    def xpath_attrib_equals(self, xpath, name, value):
-        xpath.add_condition('%s = %s' % (name, self.xpath_literal(value)))
+    def xpath_attrib_equals(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
+        assert value is not None
+        xpath.add_condition(f"{name} = {self.xpath_literal(value)}")
         return xpath
 
-    def xpath_attrib_different(self, xpath, name, value):
+    def xpath_attrib_different(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
+        assert value is not None
         # FIXME: this seems like a weird hack...
         if value:
-            xpath.add_condition('not(%s) or %s != %s'
-                                % (name, name, self.xpath_literal(value)))
+            xpath.add_condition(f"not({name}) or {name} != {self.xpath_literal(value)}")
         else:
-            xpath.add_condition('%s != %s'
-                                % (name, self.xpath_literal(value)))
+            xpath.add_condition(f"{name} != {self.xpath_literal(value)}")
         return xpath
 
-    def xpath_attrib_includes(self, xpath, name, value):
-        if is_non_whitespace(value):
+    def xpath_attrib_includes(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
+        if value and is_non_whitespace(value):
+            arg = self.xpath_literal(" " + value + " ")
             xpath.add_condition(
-                "%s and contains(concat(' ', normalize-space(%s), ' '), %s)"
-                % (name, name, self.xpath_literal(' '+value+' ')))
+                f"{name} and contains(concat(' ', normalize-space({name}), ' '), {arg})"
+            )
         else:
-            xpath.add_condition('0')
+            xpath.add_condition("0")
         return xpath
 
-    def xpath_attrib_dashmatch(self, xpath, name, value):
+    def xpath_attrib_dashmatch(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
+        assert value is not None
+        arg = self.xpath_literal(value)
+        arg_dash = self.xpath_literal(value + "-")
         # Weird, but true...
-        xpath.add_condition('%s and (%s = %s or starts-with(%s, %s))' % (
-            name,
-            name, self.xpath_literal(value),
-            name, self.xpath_literal(value + '-')))
+        xpath.add_condition(
+            f"{name} and ({name} = {arg} or starts-with({name}, {arg_dash}))"
+        )
         return xpath
 
-    def xpath_attrib_prefixmatch(self, xpath, name, value):
+    def xpath_attrib_prefixmatch(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
         if value:
-            xpath.add_condition('%s and starts-with(%s, %s)' % (
-                name, name, self.xpath_literal(value)))
+            xpath.add_condition(
+                f"{name} and starts-with({name}, {self.xpath_literal(value)})"
+            )
         else:
-            xpath.add_condition('0')
+            xpath.add_condition("0")
         return xpath
 
-    def xpath_attrib_suffixmatch(self, xpath, name, value):
+    def xpath_attrib_suffixmatch(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
         if value:
             # Oddly there is a starts-with in XPath 1.0, but not ends-with
             xpath.add_condition(
-                '%s and substring(%s, string-length(%s)-%s) = %s'
-                % (name, name, name, len(value)-1, self.xpath_literal(value)))
+                f"{name} and substring({name}, string-length({name})-{len(value) - 1}) = {self.xpath_literal(value)}"
+            )
         else:
-            xpath.add_condition('0')
+            xpath.add_condition("0")
         return xpath
 
-    def xpath_attrib_substringmatch(self, xpath, name, value):
+    def xpath_attrib_substringmatch(
+        self, xpath: XPathExpr, name: str, value: str | None
+    ) -> XPathExpr:
         if value:
             # Attribute selectors are case sensitive
-            xpath.add_condition('%s and contains(%s, %s)' % (
-                name, name, self.xpath_literal(value)))
+            xpath.add_condition(
+                f"{name} and contains({name}, {self.xpath_literal(value)})"
+            )
         else:
-            xpath.add_condition('0')
+            xpath.add_condition("0")
         return xpath
 
 
@@ -678,47 +814,52 @@ class HTMLTranslator(GenericTranslator):
 
     """
 
-    lang_attribute = 'lang'
+    lang_attribute = "lang"
 
-    def __init__(self, xhtml=False):
+    def __init__(self, xhtml: bool = False) -> None:
         self.xhtml = xhtml  # Might be useful for sub-classes?
         if not xhtml:
             # See their definition in GenericTranslator.
             self.lower_case_element_names = True
             self.lower_case_attribute_names = True
 
-    def xpath_checked_pseudo(self, xpath):
+    def xpath_checked_pseudo(self, xpath: XPathExpr) -> XPathExpr:  # type: ignore[override]
         # FIXME: is this really all the elements?
         return xpath.add_condition(
             "(@selected and name(.) = 'option') or "
             "(@checked "
-                "and (name(.) = 'input' or name(.) = 'command')"
-                "and (@type = 'checkbox' or @type = 'radio'))")
+            "and (name(.) = 'input' or name(.) = 'command')"
+            "and (@type = 'checkbox' or @type = 'radio'))"
+        )
 
-    def xpath_lang_function(self, xpath, function):
-        if function.argument_types() not in (['STRING'], ['IDENT']):
+    def xpath_lang_function(self, xpath: XPathExpr, function: Function) -> XPathExpr:
+        if function.argument_types() not in (["STRING"], ["IDENT"]):
             raise ExpressionError(
-                "Expected a single string or ident for :lang(), got %r"
-                % function.arguments)
+                f"Expected a single string or ident for :lang(), got {function.arguments!r}"
+            )
         value = function.arguments[0].value
+        assert value
+        arg = self.xpath_literal(value.lower() + "-")
         return xpath.add_condition(
             "ancestor-or-self::*[@lang][1][starts-with(concat("
-                # XPath 1.0 has no lower-case function...
-                "translate(@%s, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-                               "'abcdefghijklmnopqrstuvwxyz'), "
-                "'-'), %s)]"
-            % (self.lang_attribute, self.xpath_literal(value.lower() + '-')))
+            # XPath 1.0 has no lower-case function...
+            f"translate(@{self.lang_attribute}, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+            "'abcdefghijklmnopqrstuvwxyz'), "
+            f"'-'), {arg})]"
+        )
 
-    def xpath_link_pseudo(self, xpath):
-        return xpath.add_condition("@href and "
-            "(name(.) = 'a' or name(.) = 'link' or name(.) = 'area')")
+    def xpath_link_pseudo(self, xpath: XPathExpr) -> XPathExpr:  # type: ignore[override]
+        return xpath.add_condition(
+            "@href and (name(.) = 'a' or name(.) = 'link' or name(.) = 'area')"
+        )
 
     # Links are never visited, the implementation for :visited is the same
     # as in GenericTranslator
 
-    def xpath_disabled_pseudo(self, xpath):
+    def xpath_disabled_pseudo(self, xpath: XPathExpr) -> XPathExpr:  # type: ignore[override]
         # http://www.w3.org/TR/html5/section-index.html#attributes-1
-        return xpath.add_condition('''
+        return xpath.add_condition(
+            """
         (
             @disabled and
             (
@@ -740,13 +881,15 @@ class HTMLTranslator(GenericTranslator):
             )
             and ancestor::fieldset[@disabled]
         )
-        ''')
+        """
+        )
         # FIXME: in the second half, add "and is not a descendant of that
         # fieldset element's first legend element child, if any."
 
-    def xpath_enabled_pseudo(self, xpath):
+    def xpath_enabled_pseudo(self, xpath: XPathExpr) -> XPathExpr:  # type: ignore[override]
         # http://www.w3.org/TR/html5/section-index.html#attributes-1
-        return xpath.add_condition('''
+        return xpath.add_condition(
+            """
         (
             @href and (
                 name(.) = 'a' or
@@ -774,7 +917,8 @@ class HTMLTranslator(GenericTranslator):
                 @disabled or ancestor::optgroup[@disabled]
             )
         )
-        ''')
+        """
+        )
         # FIXME: ... or "li elements that are children of menu elements,
         # and that have a child element that defines a command, if the first
         # such element's Disabled State facet is false (not disabled)".
